@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import re
 
-RAW_FILE = "f1_2025_first15_raw.csv"
-OUT_FILE = "f1_2025_processed.csv"
+RAW_FILE = "f1_raw_2021_2025.csv"
+OUT_FILE = "f1_processed_2021_2025.csv"
 
 
 def parse_lap_time_to_sec(s):
@@ -14,8 +14,8 @@ def parse_lap_time_to_sec(s):
     if pd.isna(s) or s == "":
         return np.nan
     s = s.strip()
-    # Handle formats like '1:29.841', '0:59.123', '1:42:06.304'
     parts = s.split(":")
+
     try:
         if len(parts) == 2:
             # mm:ss.sss
@@ -29,8 +29,7 @@ def parse_lap_time_to_sec(s):
             seconds = float(parts[2])
             return hours * 3600.0 + minutes * 60.0 + seconds
         else:
-            # Something weird like '+8.481s' or 'DNF' coz it was breaking in such cases AGAIN
-            # Try to extract a number ending with 's'
+            # Something like '+8.481s', dnf or sumn else
             m = re.search(r"([\d\.]+)s$", s)
             if m:
                 return float(m.group(1))
@@ -46,7 +45,6 @@ def parse_speed_to_float(s):
     if pd.isna(s) or s == "":
         return np.nan
     s = str(s)
-    # Strip everything except digits, '.', and minus sign
     cleaned = re.sub(r"[^0-9\.\-]", "", s)
     try:
         return float(cleaned)
@@ -58,7 +56,7 @@ def main():
     df = pd.read_csv(RAW_FILE)
 
     # Basic numeric conversions
-    for col in [
+    numeric_cols = [
         "total_laps",
         "grid_position",
         "final_position",
@@ -68,7 +66,8 @@ def main():
         "last_pit_lap",
         "fastest_lap_rank",
         "fastest_lap_lap",
-    ]:
+    ]
+    for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -77,25 +76,21 @@ def main():
     df["num_drivers"] = df.groupby(grp_keys)["driver_number"].transform("count")
 
     # Parse times to seconds
-    # grid_time can be blank or NaN
     if "grid_time" in df.columns:
         df["grid_time_sec"] = df["grid_time"].apply(parse_lap_time_to_sec)
     else:
         df["grid_time_sec"] = np.nan
 
-    # fastest lap time
     if "fastest_lap_time" in df.columns:
         df["fastest_lap_time_sec"] = df["fastest_lap_time"].apply(parse_lap_time_to_sec)
     else:
         df["fastest_lap_time_sec"] = np.nan
 
-    # total pit time
     if "total_pit_time" in df.columns:
         df["total_pit_time_sec"] = pd.to_numeric(df["total_pit_time"], errors="coerce")
     else:
         df["total_pit_time_sec"] = np.nan
 
-    # fastest lap avg speed
     if "fastest_lap_avg_speed" in df.columns:
         df["fastest_lap_avg_speed_float"] = df["fastest_lap_avg_speed"].apply(
             parse_speed_to_float
@@ -103,13 +98,12 @@ def main():
     else:
         df["fastest_lap_avg_speed_float"] = np.nan
 
-    # Compute race-fastest lap time (per race group)
+    # Per-race fastest lap time (to compute deltas)
     df["race_fastest_lap_time_sec"] = (
         df.groupby(grp_keys)["fastest_lap_time_sec"].transform("min")
     )
 
-    # I just labelled all the features below js check it out: 
-
+    
     # Grid features
     df["grid_pos"] = df["grid_position"]
     df["grid_pos_norm"] = df["grid_pos"] / df["num_drivers"]
@@ -120,10 +114,9 @@ def main():
     df["first_pit_frac"] = df["first_pit_lap"] / df["total_laps"]
     df["last_pit_frac"] = df["last_pit_lap"] / df["total_laps"]
 
-    # pitted_at_all: 1 if at least one pit stop
     df["pitted_at_all"] = (df["pit_stops_int"] > 0).astype(int)
 
-    # If never pitted, set first_pit_frac to >1 so "pit_before_half" becomes 0
+    # If never pitted, push frac > 1 so pit_before_half = 0
     df.loc[df["pitted_at_all"] == 0, "first_pit_frac"] = 1.1
     df.loc[df["pitted_at_all"] == 0, "last_pit_frac"] = 1.1
 
@@ -132,16 +125,14 @@ def main():
     # Pace features from fastest lap
     df["fastest_lap_rank_norm"] = df["fastest_lap_rank"] / df["num_drivers"]
     df["fastest_lap_lap_frac"] = df["fastest_lap_lap"] / df["total_laps"]
-
-    # Delta to race fastest lap
     df["fastest_lap_delta"] = (
         df["fastest_lap_time_sec"] - df["race_fastest_lap_time_sec"]
     )
 
-    # Replace any weird infinities with NaN
+    # Clean infinities
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    # simple fill for NaNs in numeric features (can also do this in training code)
+    # Numeric feature columns we want to use
     feature_cols_numeric = [
         "grid_pos",
         "grid_pos_norm",
@@ -156,21 +147,22 @@ def main():
         "fastest_lap_delta",
     ]
 
+    # Fill NaNs in numeric features with median (simple and safe)
     for col in feature_cols_numeric:
         if col in df.columns:
             df[col] = df[col].fillna(df[col].median())
 
-    
+    # Label
     df["is_winner"] = df["is_winner"].astype(int)
 
-    # You can comment this block out if you prefer encoding teams in the training code.
+    # One-hot encode team_name
     team_dummies = pd.get_dummies(df["team_name"], prefix="team")
     df = pd.concat([df, team_dummies], axis=1)
 
-    # Final feature list to train on
+    # Final feature list = numeric + team one-hots
     feature_cols = feature_cols_numeric + list(team_dummies.columns)
 
-    # Meta columns 
+    # Meta columns to keep for grouping/interpretation
     meta_cols = [
         "year",
         "round",
@@ -185,6 +177,7 @@ def main():
 
     df_out = df[out_cols].copy()
     df_out.to_csv(OUT_FILE, index=False)
+
     print(f"Wrote processed dataset with {len(df_out)} rows to {OUT_FILE}")
     print("Feature columns used:")
     for c in feature_cols:
