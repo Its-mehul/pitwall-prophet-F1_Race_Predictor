@@ -141,19 +141,26 @@ def evaluate(model, loader):
             yb = yb.to(DEVICE)
 
             logits = model(xb)
-            all_logits.append(logits.cpu())
-            all_targets.append(yb.cpu())
 
-    all_logits = torch.cat(all_logits, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
+            all_logits.append(logits)
+            all_targets.append(yb)
 
-    probs = torch.sigmoid(all_logits)
-    preds = (probs >= 0.5).float()
+    
+    all_logits = torch.cat(all_logits, dim=0)        # shape (N, 1)
+    all_targets = torch.cat(all_targets, dim=0)      # shape (N, 1)
 
+    # Compute loss
     loss = criterion(all_logits, all_targets).item()
-    acc = accuracy_score(all_targets.numpy(), preds.numpy())
+
+    
+    probs = torch.sigmoid(all_logits).cpu()
+    preds = (probs >= 0.5).float()
+    targets_cpu = all_targets.cpu()
+
+    acc = accuracy_score(targets_cpu.numpy(), preds.numpy())
 
     return loss, acc
+
 
 
 # The trainingg loop
@@ -189,6 +196,6 @@ for epoch in range(1, EPOCHS + 1):
 # Final evaluation on test set
 
 test_loss, test_acc = evaluate(model, test_loader)
-print("\n=== Final Test Performance (Baseline MLP) ===")
+print("\n Final Test Performance ")
 print(f"Test loss: {test_loss:.4f}")
 print(f"Test accuracy: {test_acc:.4f}")
