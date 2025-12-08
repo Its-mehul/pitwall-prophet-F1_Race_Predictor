@@ -186,10 +186,10 @@ for epoch in range(1, EPOCHS + 1):
 
     if epoch == 1 or epoch % 5 == 0:
         print(
-            f"Epoch {epoch:03d} | "
-            f"train_loss={avg_train_loss:.4f} | "
-            f"val_loss={val_loss:.4f} | "
-            f"val_acc={val_acc:.4f}"
+        f"Epoch {epoch:03d} | "
+        f"train_loss={avg_train_loss:.4f} | "
+        f"val_loss={val_loss:.4f} | "
+        f"val_acc={val_acc * 100:.2f}%"
         )
 
 
@@ -198,4 +198,5 @@ for epoch in range(1, EPOCHS + 1):
 test_loss, test_acc = evaluate(model, test_loader)
 print("\n Final Test Performance ")
 print(f"Test loss: {test_loss:.4f}")
-print(f"Test accuracy: {test_acc:.4f}")
+print(f"Test accuracy: {test_acc * 100:.2f}%")
+
