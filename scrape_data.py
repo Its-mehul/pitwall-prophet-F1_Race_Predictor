@@ -375,7 +375,7 @@ def scrape_year(year: int):
 
 def main():
     # Years we want to scrape
-    years = [2021, 2025]
+    years = [2021, 2025, 2024, 2023, 2022]
 
     rows = []
     for year in years:

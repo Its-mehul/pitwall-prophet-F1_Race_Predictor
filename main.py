@@ -1,7 +1,7 @@
 import random
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score # replace with metric method. Add two more accuracy metrics.
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -135,7 +135,7 @@ class ImprovedMLP(nn.Module):
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(0.2),
-
+        
             nn.Linear(64, 32),
             nn.BatchNorm1d(32),
             nn.ReLU(),
@@ -169,8 +169,6 @@ print(f"Training on device: {DEVICE}")
 print(f"Batch size={BATCH_SIZE}, lr={LR}, weight_decay={WEIGHT_DECAY}, epochs={EPOCHS}")
 
 
-
-
 def evaluate(model, loader):
     model.eval()
     all_logits = []
@@ -192,7 +190,7 @@ def evaluate(model, loader):
     # Loss on device
     loss = criterion(all_logits, all_targets).item()
 
-    # Accuracy on CPU
+    # Accuracy on CPU 
     probs = torch.sigmoid(all_logits).cpu()
     preds = (probs >= 0.5).float()
     targets_cpu = all_targets.cpu()
@@ -230,7 +228,6 @@ for epoch in range(1, EPOCHS + 1):
             f"val_loss={val_loss:.4f} | "
             f"val_acc={val_acc * 100:.2f}%"
         )
-
 
 
 
