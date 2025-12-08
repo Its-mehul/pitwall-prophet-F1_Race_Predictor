@@ -7,8 +7,6 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE = "https://www.formula1.com"
-YEAR = 2025
-MAX_RACES = 15
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; F1ProjectScraper/1.0)",
@@ -22,15 +20,14 @@ def get_html(url: str) -> str:
     return resp.text
 
 
-def get_race_result_paths(year: int, max_races: int):
+def get_race_result_paths(year: int):
     """
-    Scrape the main 'YEAR RACE RESULTS' page and extract race-result URLs, like:
+    Scrape the main 'YEAR RACE RESULTS' page and extract all race-result URLs, like:
       /en/results/2025/races/1254/australia/race-result
     """
     url = f"{BASE}/en/results/{year}/races"
     html = get_html(url)
 
-    # Attribute values are in the HTML, so a regex on the raw HTML works.
     pattern = rf'(/en/results/{year}/races/\d+/[a-z-]+/race-result)'
     paths = re.findall(pattern, html)
 
@@ -42,9 +39,9 @@ def get_race_result_paths(year: int, max_races: int):
             ordered.append(p)
 
     if not ordered:
-        raise RuntimeError("Could not find any race-result URLs. Check the regex or site layout.")
+        raise RuntimeError(f"Could not find any race-result URLs for {year}. Check the regex or site layout.")
 
-    return ordered[:max_races]
+    return ordered
 
 
 def find_table_by_header(soup: BeautifulSoup, header_keywords):
@@ -88,7 +85,7 @@ def scrape_starting_grid(url: str):
     return results
 
 
-def scrape_race_result(url: str, round_idx: int):
+def scrape_race_result(url: str, year: int, round_idx: int):
     """
     Returns:
       race_meta: dict with race_name, race_slug, year, round, total_laps
@@ -110,7 +107,7 @@ def scrape_race_result(url: str, round_idx: int):
         print(f"[WARN] No race result table found for {url}")
         return {
             "race_meta": {
-                "year": YEAR,
+                "year": year,
                 "round": round_idx,
                 "race_name": race_name,
                 "race_slug": race_slug,
@@ -120,7 +117,7 @@ def scrape_race_result(url: str, round_idx: int):
         }
 
     race_meta = {
-        "year": YEAR,
+        "year": year,
         "round": round_idx,
         "race_name": race_name,
         "race_slug": race_slug,
@@ -290,29 +287,32 @@ def scrape_fastest_laps(url: str):
     return data
 
 
-def main():
-    race_result_paths = get_race_result_paths(YEAR, MAX_RACES)
-    print(f"Found {len(race_result_paths)} race-result URLs:")
+def scrape_year(year: int):
+    """
+    Scrape all races for a given year and return a list of row dicts.
+    """
+    race_result_paths = get_race_result_paths(year)
+    print(f"\n=== Year {year}: found {len(race_result_paths)} race-result URLs ===")
     for p in race_result_paths:
         print("  ", p)
 
-    rows = []
+    all_rows = []
 
     for round_idx, rel_path in enumerate(race_result_paths, start=1):
         race_result_url = BASE + rel_path
-        base_prefix = rel_path.rsplit("/", 1)[0]  # /en/results/2025/races/1254/australia
+        base_prefix = rel_path.rsplit("/", 1)[0]
 
         starting_grid_url = f"{BASE}{base_prefix}/starting-grid"
         pit_stop_url = f"{BASE}{base_prefix}/pit-stop-summary"
         fastest_laps_url = f"{BASE}{base_prefix}/fastest-laps"
 
-        print(f"\n[Round {round_idx}] Scraping:")
+        print(f"\n[Year {year} Round {round_idx}] Scraping:")
         print("  Race result    :", race_result_url)
         print("  Starting grid  :", starting_grid_url)
         print("  Pit stops      :", pit_stop_url)
         print("  Fastest laps   :", fastest_laps_url)
 
-        rr = scrape_race_result(race_result_url, round_idx)
+        rr = scrape_race_result(race_result_url, year, round_idx)
         race_meta = rr["race_meta"]
         per_driver = rr["per_driver"]
 
@@ -366,11 +366,22 @@ def main():
                 row["fastest_lap_time"] = fl_info[number]["fastest_lap_time"]
                 row["fastest_lap_avg_speed"] = fl_info[number]["fastest_lap_avg_speed"]
 
-            rows.append(row)
+            all_rows.append(row)
 
-        time.sleep(1.0)  # be nice pls  
+        time.sleep(1.0)  # don't hammer the server coz it KEEPS DYING ON ME
 
-    out_file = "f1_2025_first15_raw.csv"
+    return all_rows
+
+
+def main():
+    # Years we want to scrape
+    years = [2021, 2025]
+
+    rows = []
+    for year in years:
+        rows.extend(scrape_year(year))
+
+    out_file = "f1_raw_2021_2025.csv"
     if rows:
         fieldnames = list(rows[0].keys())
         with open(out_file, "w", newline="", encoding="utf-8") as f:
