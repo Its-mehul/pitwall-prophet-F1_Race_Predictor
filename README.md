@@ -1,3 +1,8 @@
+### USE THIS LINK TO SEE REAL CHAT GPT:
+
+https://chatgpt.com/share/6937450c-3968-800f-82c4-fe1aa16f16b2
+
+
 ### Prompt I used :
 
 I am doing a machine learning class project where I predict whether a Formula 1 driver will win a race based on mid-race style features that I collected and engineered myself by scraping data from formula1.com.

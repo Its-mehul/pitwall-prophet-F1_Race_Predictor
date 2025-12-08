@@ -65,7 +65,7 @@ n_rounds_2025 = len(unique_rounds_2025)
 if n_rounds_2025 == 0:
     raise RuntimeError("No 2025 data found in the processed CSV.")
 
-# Split 2025 rounds ~60% train, 20% val, 20% test ( what the prof said pretty much)
+# Split 2025 rounds ~60% train, 20% val, 20% test ( what the prof said pretty much) 
 train_cut = int(np.ceil(0.6 * n_rounds_2025))
 val_cut = int(np.ceil(0.8 * n_rounds_2025))
 
