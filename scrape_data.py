@@ -21,10 +21,7 @@ def get_html(url: str) -> str:
 
 
 def get_race_result_paths(year: int):
-    """
-    Scrape the main 'YEAR RACE RESULTS' page and extract all race-result URLs, like:
-      /en/results/2025/races/1254/australia/race-result
-    """
+  
     url = f"{BASE}/en/results/{year}/races"
     html = get_html(url)
 
@@ -45,10 +42,7 @@ def get_race_result_paths(year: int):
 
 
 def find_table_by_header(soup: BeautifulSoup, header_keywords):
-    """
-    Find a <table> whose header row contains ALL header_keywords
-    somewhere among its <th> texts.
-    """
+ 
     for table in soup.find_all("table"):
         header_cells = table.find_all("th")
         header_text = " ".join(th.get_text(" ", strip=True) for th in header_cells)
@@ -58,9 +52,7 @@ def find_table_by_header(soup: BeautifulSoup, header_keywords):
 
 
 def scrape_starting_grid(url: str):
-    """
-    Returns dict[number] -> {"grid_position": str, "grid_time": str}
-    """
+ 
     html = get_html(url)
     soup = BeautifulSoup(html, "html.parser")
     table = find_table_by_header(soup, ["Pos", "Driver", "Time"])
@@ -86,11 +78,7 @@ def scrape_starting_grid(url: str):
 
 
 def scrape_race_result(url: str, year: int, round_idx: int):
-    """
-    Returns:
-      race_meta: dict with race_name, race_slug, year, round, total_laps
-      per_driver: dict[number] -> driver result info (+ is_winner)
-    """
+  
     html = get_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
@@ -134,13 +122,24 @@ def scrape_race_result(url: str, year: int, round_idx: int):
         if not cols:
             continue
 
-        # Expected: Pos, No, Driver, Team, Laps, Time/Retired, Pts
+        
+        if "No results available" in " ".join(cols): #hopefully handles the issue with Imola 23 missing data and if tehres other stuff like that too
+            per_driver = {}
+            winner_number = None
+            total_laps = None
+            break
+
+        
+        if len(cols) < 7:
+            continue
+
+        
         pos_raw = cols[0]
         number = cols[1]
         driver_name_full = cols[2]
-        team_name = cols[3] if len(cols) > 3 else ""
-        laps = cols[4] if len(cols) > 4 else ""
-        time_or_status = cols[5] if len(cols) > 5 else ""
+        team_name = cols[3]
+        laps = cols[4]
+        time_or_status = cols[5]
         points = cols[6] if len(cols) > 6 else "0"
 
         tokens = driver_name_full.split()
@@ -150,9 +149,8 @@ def scrape_race_result(url: str, year: int, round_idx: int):
         try:
             final_position = int(pos_raw)
         except ValueError:
-            final_position = None  # NC, DNF, DNS, etc.
+            final_position = None  
 
-        # Keep track of winner & total laps
         if final_position == 1:
             winner_number = number
             try:
@@ -185,10 +183,7 @@ def scrape_race_result(url: str, year: int, round_idx: int):
 
 
 def scrape_pit_stops(url: str):
-    """
-    Returns dict[number] -> aggregated pit info:
-      {"pit_stops", "first_pit_lap", "last_pit_lap", "total_pit_time"}
-    """
+    
     html = get_html(url)
     soup = BeautifulSoup(html, "html.parser")
     table = find_table_by_header(soup, ["Stops", "Lap", "Time"])
@@ -244,14 +239,7 @@ def scrape_pit_stops(url: str):
 
 
 def scrape_fastest_laps(url: str):
-    """
-    Returns dict[number] -> {
-      "fastest_lap_rank",
-      "fastest_lap_lap",
-      "fastest_lap_time",
-      "fastest_lap_avg_speed",
-    }
-    """
+    
     html = get_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
@@ -288,11 +276,9 @@ def scrape_fastest_laps(url: str):
 
 
 def scrape_year(year: int):
-    """
-    Scrape all races for a given year and return a list of row dicts.
-    """
+
     race_result_paths = get_race_result_paths(year)
-    print(f"\n=== Year {year}: found {len(race_result_paths)} race-result URLs ===")
+    print(f"\n Year {year}: found {len(race_result_paths)} race-result URLs")
     for p in race_result_paths:
         print("  ", p)
 
@@ -375,13 +361,13 @@ def scrape_year(year: int):
 
 def main():
     # Years we want to scrape
-    years = [2021, 2025, 2024, 2023, 2022]
+    years = [2021, 2025, 2024, 2023, 2022, 2020, 2019, 2018, 2017, 2016,2015, 2014]
 
     rows = []
     for year in years:
         rows.extend(scrape_year(year))
 
-    out_file = "f1_raw_2021_2025.csv"
+    out_file = "f1_raw_2014-2025.csv"
     if rows:
         fieldnames = list(rows[0].keys())
         with open(out_file, "w", newline="", encoding="utf-8") as f:
@@ -390,7 +376,7 @@ def main():
             writer.writerows(rows)
         print(f"\nWrote {len(rows)} rows to {out_file}")
     else:
-        print("No rows scraped; check for errors.")
+        print("it broke")
 
 
 if __name__ == "__main__":
