@@ -23,15 +23,15 @@ class F1RacePositionPreprocessor:
         print(".\n.\n.")
         print(str(self.raw_data.tail(2)) + "\n")
         
-        # Filter only finished drivers (exclude DNF/NC)
+        # Include DNF drivers, set their position to 21
         print("="*80)
-        print("STEP 2: Filtering Finished Drivers Only")
+        print("STEP 2: Including DNF Drivers (Position 21)")
         print("="*80)
         initial_count = len(self.raw_data)
-        self.raw_data = self.raw_data[self.raw_data['final_position'].notna()].copy()
-        print(f"Rows before filtering: {initial_count}")
-        print(f"Rows after removing DNF/NC: {len(self.raw_data)}")
-        print(f"Removed {initial_count - len(self.raw_data)} DNF entries\n")
+        self.raw_data['final_position'] = self.raw_data['final_position'].fillna(21)
+        print(f"Total rows: {len(self.raw_data)}")
+        print(f"DNF drivers set to position 21: {self.raw_data['final_position'].eq(21).sum()}")
+        print(f"Finished drivers: {self.raw_data['final_position'].le(20).sum()}\n")
         
         # Analyze race completeness
         print("="*80)
@@ -42,13 +42,12 @@ class F1RacePositionPreprocessor:
         print(f"\nFinishers distribution:")
         print(race_finishers['num_finishers'].value_counts().sort_index())
         
-        # Filter races with 15-20 finishers
+        # Filter races with exactly 20 finishers (including DNFs as position 21)
         valid_races = race_finishers[
-            (race_finishers['num_finishers'] >= 15) & 
-            (race_finishers['num_finishers'] <= 20)
+            race_finishers['num_finishers'] == 20
         ][['year', 'round']]
         
-        print(f"\nRaces with 15-20 finishers: {len(valid_races)}")
+        print(f"\nRaces with exactly 20 finishers: {len(valid_races)}")
         
         self.raw_data = self.raw_data.merge(valid_races, on=['year', 'round'], how='inner')
         print(f"Rows after filtering valid races: {len(self.raw_data)}\n")
@@ -161,6 +160,7 @@ class F1RacePositionPreprocessor:
             'fastest_lap_rank', 'fastest_lap_lap', 'fastest_lap_time',
             'fastest_lap_avg_speed', 'is_winner', 'fastest_lap_seconds',
             'grid_position'
+            # Do NOT exclude dnf_rate_driver or dnf_rate_team
         ]
         
         feature_cols = [
@@ -187,19 +187,9 @@ class F1RacePositionPreprocessor:
             # Sort by final position
             race_df = race_df.sort_values('final_position').reset_index(drop=True)
             
-            # Extract features and labels
-            features = race_df[feature_cols].values  # [num_finishers, num_features]
-            positions = race_df['final_position'].values  # [num_finishers,]
-            
-            # Pad to 20 drivers if needed
-            if num_finishers < 20:
-                # Padding with zeros for features
-                pad_features = np.zeros((20 - num_finishers, len(feature_cols)))
-                features = np.vstack([features, pad_features])
-                
-                # Padding with 21 for positions (invalid position marker)
-                pad_positions = np.full(20 - num_finishers, 21)
-                positions = np.concatenate([positions, pad_positions])
+            # All races have exactly 20 finishers, no padding needed
+            features = race_df[feature_cols].values  # [20, num_features]
+            positions = race_df['final_position'].values  # [20,]
             
             race_data.append(features)
             race_labels.append(positions)
@@ -275,7 +265,7 @@ class F1RacePositionPreprocessor:
         print(f"  File size: {np.round(np.array([self.X_train.nbytes, self.y_train.nbytes]).sum() / 1024**2, 2)} MB")
 
 def main():
-    preprocessor = F1RacePositionPreprocessor('f1_raw_2021_2025.csv')
+    preprocessor = F1RacePositionPreprocessor('f1_processed_2021_2025.csv')
     preprocessor.wrangle_data()
     preprocessor.split_data()
     preprocessor.save_processed_data()

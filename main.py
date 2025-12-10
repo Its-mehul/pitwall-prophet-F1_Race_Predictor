@@ -13,53 +13,165 @@ from scipy.optimize import linear_sum_assignment
 warnings.filterwarnings('ignore')
 
 
-class PositionPredictionNetwork(nn.Module):
-    """Neural network for predicting race finishing positions"""
+class PointerNetwork(nn.Module):
+    """Pointer Network for position assignment - learns to point to drivers in finishing order"""
     
-    def __init__(self, input_dim, hidden_layers=(128, 64), dropout=0.2, activation='relu'):
+    def __init__(self, input_dim, hidden_dim=128, dropout=0.2):
         super().__init__()
         
-        activation_map = {
-            'relu': nn.ReLU(),
-            'leaky_relu': nn.LeakyReLU(),
-            'elu': nn.ELU(),
-            'tanh': nn.Tanh(),
-            'sigmoid': nn.Sigmoid()
-        }
-        act_fn = activation_map.get(activation, nn.ReLU())
+        # Encoder for driver features
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
         
-        # Per-driver feature encoder
-        layers = []
-        prev_dim = input_dim
+        # Decoder LSTM
+        self.decoder_lstm = nn.LSTMCell(hidden_dim, hidden_dim)
         
-        for hidden_dim in hidden_layers:
-            layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                type(act_fn)(),
-                nn.Dropout(dropout),
-            ])
-            prev_dim = hidden_dim
+        # Attention mechanism
+        self.attention = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.attention_score = nn.Linear(hidden_dim, 1)
         
-        self.encoder = nn.Sequential(*layers)
-        self.position_head = nn.Linear(prev_dim, 20)
+        # Pointer output
+        self.pointer = nn.Linear(hidden_dim, 1)
+        
+        self.hidden_dim = hidden_dim
+        
+    def forward(self, x):
+        """x: [batch_size, num_drivers, num_features]"""
+        batch_size, num_drivers, num_features = x.shape
+        
+        # Encode all drivers
+        x_flat = x.view(-1, num_features)
+        encoded = self.encoder(x_flat)  # [batch_size * num_drivers, hidden_dim]
+        encoded = encoded.view(batch_size, num_drivers, self.hidden_dim)
+        
+        # Initialize decoder
+        decoder_input = encoded.mean(dim=1)  # Use mean as initial input
+        decoder_hidden = torch.zeros(batch_size, self.hidden_dim, device=x.device)
+        decoder_cell = torch.zeros(batch_size, self.hidden_dim, device=x.device)
+        
+        # Generate sequence of pointers
+        pointers = []
+        mask = torch.ones(batch_size, num_drivers, device=x.device)
+        
+        for i in range(num_drivers):
+            # Decoder step
+            decoder_hidden, decoder_cell = self.decoder_lstm(decoder_input, (decoder_hidden, decoder_cell))
+            
+            # Attention over remaining drivers
+            decoder_hidden_expanded = decoder_hidden.unsqueeze(1).expand(-1, num_drivers, -1)
+            attention_input = torch.cat([encoded, decoder_hidden_expanded], dim=2)
+            attention_weights = torch.tanh(self.attention(attention_input))
+            scores = self.attention_score(attention_weights).squeeze(-1)
+            
+            # Mask out already selected drivers
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+            probs = torch.softmax(scores, dim=1)
+            
+            # Sample or take argmax (during inference)
+            if self.training:
+                selected = torch.multinomial(probs, 1).squeeze(-1)
+            else:
+                selected = torch.argmax(probs, dim=1)
+            
+            pointers.append(selected)
+            
+            # Update mask and decoder input
+            mask.scatter_(1, selected.unsqueeze(1), 0)
+            decoder_input = encoded.gather(1, selected.unsqueeze(1).unsqueeze(2).expand(-1, -1, self.hidden_dim)).squeeze(1)
+        
+        return torch.stack(pointers, dim=1)  # [batch_size, num_drivers]
+
+
+class PositionPredictionNetwork(nn.Module):
+    """Neural network for predicting race finishing positions with conditional DNF modeling"""
+    
+    def __init__(self, input_dim, hidden_layers=(128, 64), dropout=0.2, activation='relu', use_pointer=False, use_conditional=False):
+        super().__init__()
+        
+        self.use_pointer = use_pointer
+        self.use_conditional = use_conditional
+        
+        if use_pointer:
+            self.pointer_net = PointerNetwork(input_dim, hidden_dim=128, dropout=dropout)
+        else:
+            activation_map = {
+                'relu': nn.ReLU(),
+                'leaky_relu': nn.LeakyReLU(),
+                'elu': nn.ELU(),
+                'tanh': nn.Tanh(),
+                'sigmoid': nn.Sigmoid()
+            }
+            act_fn = activation_map.get(activation, nn.ReLU())
+            
+            # Shared encoder for all drivers
+            layers = []
+            prev_dim = input_dim
+            
+            for hidden_dim in hidden_layers:
+                layers.extend([
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.BatchNorm1d(hidden_dim),
+                    type(act_fn)(),
+                    nn.Dropout(dropout),
+                ])
+                prev_dim = hidden_dim
+            
+            self.encoder = nn.Sequential(*layers)
+            
+            if use_conditional:
+                # Conditional modeling: predict DNF first, then positions conditioned on DNF
+                self.dnf_head = nn.Linear(prev_dim, 1)  # Binary DNF prediction
+                # Position prediction takes DNF status as additional input
+                self.position_head = nn.Linear(prev_dim + 1, 21)
+            else:
+                # Standard position prediction
+                self.position_head = nn.Linear(prev_dim, 21)
         
     def forward(self, x):
         """x: [batch_size, num_drivers (20), num_features]"""
-        batch_size, num_drivers, num_features = x.shape
-        x_flat = x.view(-1, num_features)
-        encoded = self.encoder(x_flat)
-        logits = self.position_head(encoded)
-        return logits.view(batch_size, num_drivers, 20)
+        if self.use_pointer:
+            # Return pointer indices directly
+            return self.pointer_net(x)
+        else:
+            batch_size, num_drivers, num_features = x.shape
+            x_flat = x.view(-1, num_features)
+            encoded = self.encoder(x_flat)  # [batch_size * num_drivers, hidden_dim]
+            
+            if self.use_conditional:
+                # Predict DNF probabilities first
+                dnf_logits = self.dnf_head(encoded)  # [batch_size * num_drivers, 1]
+                dnf_probs = torch.sigmoid(dnf_logits)
+                
+                # Concatenate DNF probs with encoded features for position prediction
+                position_input = torch.cat([encoded, dnf_probs], dim=1)  # [batch_size * num_drivers, hidden_dim + 1]
+                position_logits = self.position_head(position_input)
+                
+                # Reshape outputs
+                dnf_probs = dnf_probs.view(batch_size, num_drivers, 1)
+                position_logits = position_logits.view(batch_size, num_drivers, 21)
+                
+                return position_logits, dnf_probs
+            else:
+                # Standard prediction
+                logits = self.position_head(encoded)
+                return logits.view(batch_size, num_drivers, 21)
 
 
 class F1PositionPredictionPipeline:
     """End-to-end pipeline for F1 race position prediction"""
     
-    def __init__(self, data_file, device='cpu', seed=339):
+    def __init__(self, data_file, device='cpu', seed=339, use_pointer=False, use_conditional=False):
         self.data_file = data_file
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.seed = seed
+        self.use_pointer = use_pointer
+        self.use_conditional = use_conditional
         
         # Set random seeds
         random.seed(self.seed)
@@ -88,8 +200,8 @@ class F1PositionPredictionPipeline:
         print(f"Features per driver: {self.X_train.shape[2]}\n")
     
     def create_mask(self, y):
-        """Create mask for valid drivers (position <= 20)"""
-        return (y <= 20).astype(np.float32)
+        """Create mask for valid drivers (position <= 21)"""
+        return (y <= 21).astype(np.float32)
     
     def hungarian_matching(self, pred_probs, mask=None):
         """Use Hungarian algorithm to assign unique positions to drivers"""
@@ -108,6 +220,47 @@ class F1PositionPredictionPipeline:
         
         return assignments
     
+    def adjust_positions_for_dnfs(self, assignments):
+        """Adjust positions to account for DNFs - compress finishing positions when DNFs occur"""
+        batch_size, num_drivers = assignments.shape
+        adjusted_assignments = np.zeros_like(assignments)
+        
+        for b in range(batch_size):
+            race_assignments = assignments[b]
+            
+            # Identify DNF drivers (position 21)
+            dnf_mask = race_assignments == 21
+            non_dnf_mask = ~dnf_mask
+            
+            # Get non-DNF drivers and their assigned positions
+            non_dnf_indices = np.where(non_dnf_mask)[0]
+            non_dnf_positions = race_assignments[non_dnf_indices]
+            
+            # Sort non-DNF drivers by their predicted positions
+            sorted_order = np.argsort(non_dnf_positions)
+            
+            # Reassign positions: DNFs stay 21, others get 1, 2, 3, ... in order
+            adjusted_race = np.full(num_drivers, 21, dtype=np.int32)
+            for new_pos, idx_in_non_dnf in enumerate(sorted_order):
+                driver_idx = non_dnf_indices[idx_in_non_dnf]
+                adjusted_race[driver_idx] = new_pos + 1
+            
+            adjusted_assignments[b] = adjusted_race
+        
+        return adjusted_assignments
+    
+    def pointer_to_assignments(self, pointers):
+        """Convert pointer network output to position assignments"""
+        batch_size, num_drivers = pointers.shape
+        assignments = np.zeros((batch_size, num_drivers), dtype=np.int32)
+        
+        for b in range(batch_size):
+            pointer_sequence = pointers[b]  # [num_drivers] - driver indices in finishing order
+            for position, driver_idx in enumerate(pointer_sequence):
+                assignments[b, driver_idx] = position + 1  # positions start from 1
+        
+        return assignments
+    
     def compute_position_accuracy(self, predictions, targets, mask=None, tolerance=0):
         """Compute accuracy of position predictions with tolerance"""
         if mask is not None:
@@ -118,7 +271,7 @@ class F1PositionPredictionPipeline:
             pred_valid = predictions.flatten()
             target_valid = targets.flatten()
         
-        valid_mask = target_valid <= 20
+        valid_mask = target_valid <= 21
         pred_valid = pred_valid[valid_mask]
         target_valid = target_valid[valid_mask]
         
@@ -148,7 +301,7 @@ class F1PositionPredictionPipeline:
             pred_valid = predictions.flatten()
             target_valid = targets.flatten()
         
-        valid_mask = target_valid <= 20
+        valid_mask = target_valid <= 21
         pred_valid = pred_valid[valid_mask]
         target_valid = target_valid[valid_mask]
         
@@ -184,10 +337,44 @@ class F1PositionPredictionPipeline:
             input_dim=input_dim,
             hidden_layers=params['hidden_layers'],
             dropout=params['dropout'],
-            activation=params['activation']
+            activation=params['activation'],
+            use_pointer=self.use_pointer,
+            use_conditional=self.use_conditional
         ).to(self.device)
         
-        criterion = nn.CrossEntropyLoss(reduction='none')
+        # Calculate class weights with higher weight for DNF class
+        y_fold_flat = y_train_fold.flatten()
+        valid_mask = (y_fold_flat >= 1) & (y_fold_flat <= 21)
+        y_fold_valid = y_fold_flat[valid_mask]
+        class_counts = np.bincount((y_fold_valid - 1).astype(int), minlength=21)  # positions 1-21 -> classes 0-20
+        total_samples = class_counts.sum()
+        class_weights = total_samples / (class_counts + 1e-6)  # Inverse frequency weighting
+        # Give DNF class (index 20) much higher weight
+        class_weights[20] *= 10.0  # 5x weight for DNF class
+        class_weights = class_weights / class_weights.sum() * 21  # Normalize
+        class_weights = torch.from_numpy(class_weights).float().to(self.device)
+        
+        # Use Focal Loss for better handling of imbalanced classes
+        class FocalLoss(nn.Module):
+            def __init__(self, alpha=None, gamma=2.0, reduction='none'):
+                super(FocalLoss, self).__init__()
+                self.alpha = alpha
+                self.gamma = gamma
+                self.reduction = reduction
+                
+            def forward(self, inputs, targets):
+                ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+                pt = torch.exp(-ce_loss)
+                focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+                
+                if self.reduction == 'mean':
+                    return focal_loss.mean()
+                elif self.reduction == 'sum':
+                    return focal_loss.sum()
+                else:  # 'none'
+                    return focal_loss
+        
+        criterion = FocalLoss(alpha=class_weights, gamma=2.0, reduction='none')
         
         if params['optimizer'] == 'adam':
             optimizer = torch.optim.Adam(
@@ -213,13 +400,34 @@ class F1PositionPredictionPipeline:
                 
                 optimizer.zero_grad()
                 
-                logits = model(xb)
-                logits_flat = logits.view(-1, 20)
-                targets_flat = (yb - 1).clamp(0, 19).view(-1).long()
-                mask_flat = mask_b.view(-1)
-                
-                loss_per_sample = criterion(logits_flat, targets_flat)
-                loss = (loss_per_sample * mask_flat).sum() / (mask_flat.sum() + 1e-8)
+                if self.use_conditional:
+                    # Conditional modeling: dual outputs
+                    position_logits, dnf_probs = model(xb)
+                    
+                    # Position loss
+                    position_logits_flat = position_logits.view(-1, 21)
+                    targets_flat = (yb - 1).clamp(0, 20).view(-1).long()
+                    mask_flat = mask_b.view(-1)
+                    position_loss = criterion(position_logits_flat, targets_flat)
+                    
+                    # DNF loss (BCE)
+                    dnf_targets = (yb == 21).float().view(-1, 1)  # 1 if DNF, 0 otherwise
+                    dnf_loss = nn.functional.binary_cross_entropy(
+                        dnf_probs.view(-1, 1), dnf_targets, reduction='none'
+                    ).view(-1)
+                    
+                    # Combine losses with masking
+                    total_loss_per_sample = position_loss + dnf_loss.view(-1)
+                    loss = (total_loss_per_sample * mask_flat).sum() / (mask_flat.sum() + 1e-8)
+                else:
+                    # Standard modeling
+                    logits = model(xb)
+                    logits_flat = logits.view(-1, 21)
+                    targets_flat = (yb - 1).clamp(0, 20).view(-1).long()
+                    mask_flat = mask_b.view(-1)
+                    
+                    loss_per_sample = criterion(logits_flat, targets_flat)
+                    loss = (loss_per_sample * mask_flat).sum() / (mask_flat.sum() + 1e-8)
                 
                 loss.backward()
                 optimizer.step()
@@ -237,6 +445,7 @@ class F1PositionPredictionPipeline:
                 probs = torch.softmax(logits, dim=-1)
                 
                 assignments = self.hungarian_matching(probs, mask_b)
+                assignments = self.adjust_positions_for_dnfs(assignments)
                 
                 all_preds.append(assignments)
                 all_targets.append(yb.numpy())
@@ -347,10 +556,45 @@ class F1PositionPredictionPipeline:
             input_dim=input_dim,
             hidden_layers=params['hidden_layers'],
             dropout=params['dropout'],
-            activation=params['activation']
+            activation=params['activation'],
+            use_pointer=self.use_pointer,
+            use_conditional=self.use_conditional
         ).to(self.device)
         
-        criterion = nn.CrossEntropyLoss(reduction='none')
+        # Calculate class weights with higher weight for DNF class
+        y_flat = self.y_train.flatten()
+        valid_mask = (y_flat >= 1) & (y_flat <= 21)
+        y_valid = y_flat[valid_mask]
+        class_counts = np.bincount((y_valid - 1).astype(int), minlength=21)  # positions 1-21 -> classes 0-20
+        total_samples = class_counts.sum()
+        class_weights = total_samples / (class_counts + 1e-6)  # Inverse frequency weighting
+        # Give DNF class (index 20) much higher weight
+        class_weights[20] *= 10.0  # 5x weight for DNF class
+        class_weights = class_weights / class_weights.sum() * 21  # Normalize
+        class_weights = torch.from_numpy(class_weights).float().to(self.device)
+        
+        
+        # Use Focal Loss for better handling of imbalanced classes
+        class FocalLoss(nn.Module):
+            def __init__(self, alpha=None, gamma=2.0, reduction='none'):
+                super(FocalLoss, self).__init__()
+                self.alpha = alpha
+                self.gamma = gamma
+                self.reduction = reduction
+                
+            def forward(self, inputs, targets):
+                ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+                pt = torch.exp(-ce_loss)
+                focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+                
+                if self.reduction == 'mean':
+                    return focal_loss.mean()
+                elif self.reduction == 'sum':
+                    return focal_loss.sum()
+                else:  # 'none'
+                    return focal_loss
+        
+        criterion = FocalLoss(alpha=class_weights, gamma=2.0, reduction='none')
         
         if params['optimizer'] == 'adam':
             optimizer = torch.optim.Adam(
@@ -378,13 +622,34 @@ class F1PositionPredictionPipeline:
                 
                 optimizer.zero_grad()
                 
-                logits = self.model(xb)
-                logits_flat = logits.view(-1, 20)
-                targets_flat = (yb - 1).clamp(0, 19).view(-1).long()
-                mask_flat = mask_b.view(-1)
-                
-                loss_per_sample = criterion(logits_flat, targets_flat)
-                loss = (loss_per_sample * mask_flat).sum() / (mask_flat.sum() + 1e-8)
+                if self.use_conditional:
+                    # Conditional modeling: dual outputs
+                    position_logits, dnf_probs = self.model(xb)
+                    
+                    # Position loss
+                    position_logits_flat = position_logits.view(-1, 21)
+                    targets_flat = (yb - 1).clamp(0, 20).view(-1).long()
+                    mask_flat = mask_b.view(-1)
+                    position_loss = criterion(position_logits_flat, targets_flat)
+                    
+                    # DNF loss (BCE)
+                    dnf_targets = (yb == 21).float().view(-1, 1)  # 1 if DNF, 0 otherwise
+                    dnf_loss = nn.functional.binary_cross_entropy(
+                        dnf_probs.view(-1, 1), dnf_targets, reduction='none'
+                    ).view(-1)
+                    
+                    # Combine losses with masking
+                    total_loss_per_sample = position_loss + dnf_loss.view(-1)
+                    loss = (total_loss_per_sample * mask_flat).sum() / (mask_flat.sum() + 1e-8)
+                else:
+                    # Standard modeling
+                    logits = self.model(xb)
+                    logits_flat = logits.view(-1, 21)
+                    targets_flat = (yb - 1).clamp(0, 20).view(-1).long()
+                    mask_flat = mask_b.view(-1)
+                    
+                    loss_per_sample = criterion(logits_flat, targets_flat)
+                    loss = (loss_per_sample * mask_flat).sum() / (mask_flat.sum() + 1e-8)
                 
                 loss.backward()
                 optimizer.step()
@@ -404,8 +669,6 @@ class F1PositionPredictionPipeline:
         print("Final Test Performance")
         print("="*80)
         
-        raw_df = pd.read_csv('f1_raw_2021_2025.csv')
-        
         test_mask = self.create_mask(self.y_test)
         
         X_test_t = torch.from_numpy(self.X_test).float()
@@ -423,10 +686,23 @@ class F1PositionPredictionPipeline:
         with torch.no_grad():
             for xb, yb, mask_b in test_loader:
                 xb = xb.to(self.device)
-                logits = self.model(xb)
-                probs = torch.softmax(logits, dim=-1)
                 
-                assignments = self.hungarian_matching(probs, mask_b)
+                if self.use_pointer:
+                    # Pointer network outputs assignments directly
+                    pointers = self.model(xb)  # [batch, num_drivers] - driver indices in order
+                    assignments = self.pointer_to_assignments(pointers.cpu().numpy())
+                elif self.use_conditional:
+                    # Conditional modeling: use position predictions (DNF conditioning is handled in training)
+                    position_logits, dnf_probs = self.model(xb)
+                    position_probs = torch.softmax(position_logits, dim=-1)  # [batch, drivers, 21]
+                    assignments = self.hungarian_matching(position_probs, mask_b)
+                else:
+                    # Standard modeling
+                    logits = self.model(xb)
+                    probs = torch.softmax(logits, dim=-1)
+                    assignments = self.hungarian_matching(probs, mask_b)
+                
+                assignments = self.adjust_positions_for_dnfs(assignments)
                 
                 all_preds.append(assignments)
                 all_targets.append(yb.numpy())
@@ -436,80 +712,27 @@ class F1PositionPredictionPipeline:
         all_targets = np.concatenate(all_targets, axis=0)
         all_masks = np.concatenate(all_masks, axis=0)
         
-        # Print detailed predictions for each race
+        # Print simplified race summary
         if show_predictions:
             total_races = len(self.race_metadata)
             test_start_idx = total_races - len(all_preds)
             
+            # Count races with DNFs
+            races_with_dnfs = 0
+            total_predicted_dnfs = 0
+            
             for i in range(len(all_preds)):
-                race_idx = test_start_idx + i
-                race_meta = self.race_metadata[race_idx]
-                
-                print(f"\n{'='*80}")
-                print(f"Race {i+1}: {race_meta['year']} Round {race_meta['round']}")
-                print(f"{race_meta['race_name'][:70]}")
-                print(f"{'='*80}")
-                
-                race_df = raw_df[
-                    (raw_df['year'] == int(race_meta['year'])) & 
-                    (raw_df['round'] == int(race_meta['round'])) &
-                    (raw_df['final_position'].notna())
-                ].sort_values('final_position').reset_index(drop=True)
-                
                 race_preds = all_preds[i]
-                race_targets = all_targets[i]
-                race_mask = all_masks[i]
-                
-                # Collect predictions
-                predictions = []
-                for pos in range(1, 21):
-                    idx = np.where(race_targets == pos)[0]
-                    if len(idx) > 0 and race_mask[idx[0]] == 1:
-                        idx = idx[0]
-                        driver_name = race_df.iloc[idx]['driver_name'] if idx < len(race_df) else 'Unknown'
-                        team_name = race_df.iloc[idx]['team_name'] if idx < len(race_df) else 'Unknown'
-                        pred_pos = int(race_preds[idx])
-                        diff = abs(pred_pos - pos)
-                        
-                        predictions.append({
-                            'pos': pos,
-                            'driver': driver_name,
-                            'team': team_name,
-                            'predicted': pred_pos,
-                            'diff': diff
-                        })
-                    else:
-                        break
-                
-                # Print grouped by accuracy
-                sections = [
-                    ('✓ EXACT PREDICTIONS', lambda p: p['diff'] == 0),
-                    ('~ OFF BY 1 POSITION', lambda p: p['diff'] == 1),
-                    ('~ OFF BY 2 POSITIONS', lambda p: p['diff'] == 2),
-                    ('~ OFF BY 3 POSITIONS', lambda p: p['diff'] == 3),
-                    ('✗ OFF BY 4+ POSITIONS', lambda p: p['diff'] >= 4)
-                ]
-                
-                for section_title, filter_func in sections:
-                    section_preds = [p for p in predictions if filter_func(p)]
-                    if section_preds:
-                        print(f"\n{section_title}:")
-                        print(f"{'Pos':<5} {'Driver':<25} {'Team':<30} {'Predicted':<12}")
-                        print("-"*80)
-                        for p in section_preds:
-                            print(f"P{p['pos']:<3} {p['driver'][:24]:<25} {p['team'][:29]:<30} "
-                                  f"P{p['predicted']:<10}")
-                
-                # Race metrics
-                exact = self.compute_position_accuracy(race_preds.reshape(1, -1), race_targets.reshape(1, -1), 
-                                                       race_mask.reshape(1, -1), tolerance=0)
-                tol2 = self.compute_position_accuracy(race_preds.reshape(1, -1), race_targets.reshape(1, -1), 
-                                                      race_mask.reshape(1, -1), tolerance=2)
-                valid = (race_targets <= 20) & (race_mask == 1)
-                race_mae = mean_absolute_error(race_targets[valid], race_preds[valid]) if valid.sum() > 0 else 0.0
-                
-                print("-"*80)
-                print(f"Race Accuracy: Exact={exact*100:.1f}%, ±2 positions={tol2*100:.1f}%, MAE={race_mae:.2f}")
+                dnf_count = (race_preds == 21).sum()
+                if dnf_count > 0:
+                    races_with_dnfs += 1
+                    total_predicted_dnfs += dnf_count
+            
+            print(f"\nTest Set Summary:")
+            print(f"- {len(all_preds)} races evaluated")
+            print(f"- {races_with_dnfs} races predicted to have DNFs ({total_predicted_dnfs} total DNF predictions)")
+            print(f"- Average DNFs per race: {total_predicted_dnfs/len(all_preds):.1f}")
+            print(f"- Actual DNF rate in test data: {(all_targets == 21).sum() / all_targets.size * 100:.1f}%")
         
         # Overall metrics
         exact_acc = self.compute_position_accuracy(all_preds, all_targets, all_masks, tolerance=0)
@@ -533,12 +756,204 @@ class F1PositionPredictionPipeline:
         print(f"Test Accuracy (±3 positions): {tol3_acc * 100:.2f}%")
         print(f"Test Bin Accuracy (Podium/Points/Mid/Back): {bin_acc * 100:.2f}%")
         print(f"Test Mean Absolute Error: {mae:.2f} positions")
+        
+        # Production-grade evaluation metrics
+        print(f"\n{'='*80}")
+        print("PRODUCTION-GRADE EVALUATION METRICS")
+        print(f"{'='*80}")
+        
+        self._production_evaluation_metrics(all_preds, all_targets, all_masks, tol2_acc)
+        
         print("="*80 + "\n")
         
         self.test_tol2_acc = tol2_acc
         self.test_mae = mae
         
         return tol2_acc, mae
+    
+    def _production_evaluation_metrics(self, predictions, targets, masks, tol2_acc):
+        """Comprehensive production-grade evaluation metrics"""
+        from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+        import numpy as np
+        
+        # Flatten predictions and targets
+        pred_flat = predictions.flatten()
+        target_flat = targets.flatten()
+        mask_flat = masks.flatten()
+        
+        # Only evaluate valid predictions
+        valid = mask_flat == 1
+        pred_valid = pred_flat[valid]
+        target_valid = target_flat[valid]
+        
+        # 1. DNF-Specific Metrics
+        print("1. DNF PREDICTION METRICS")
+        print("-" * 40)
+        
+        # Binary classification: DNF (21) vs Finish (1-20)
+        pred_dnf = (pred_valid == 21).astype(int)
+        actual_dnf = (target_valid == 21).astype(int)
+        
+        precision, recall, f1, support = precision_recall_fscore_support(
+            actual_dnf, pred_dnf, average='binary', zero_division=0
+        )
+        
+        print(f"DNF Precision: {precision:.3f} (Predicted DNFs that were actually DNFs)")
+        print(f"DNF Recall: {recall:.3f} (Actual DNFs that were predicted as DNFs)")
+        print(f"DNF F1-Score: {f1:.3f} (Harmonic mean of precision/recall)")
+        print(f"Actual DNFs: {actual_dnf.sum()}, Predicted DNFs: {pred_dnf.sum()}")
+        
+        # 2. Position Range Analysis
+        print(f"\n2. POSITION RANGE ANALYSIS")
+        print("-" * 40)
+        
+        def get_position_range(pos):
+            if pos <= 3:
+                return "Podium"
+            elif pos <= 10:
+                return "Points"
+            elif pos <= 15:
+                return "Midfield"
+            elif pos == 21:
+                return "DNF"
+            else:
+                return "Back"
+        
+        pred_ranges = [get_position_range(p) for p in pred_valid]
+        actual_ranges = [get_position_range(t) for t in target_valid]
+        
+        range_precision, range_recall, range_f1, _ = precision_recall_fscore_support(
+            actual_ranges, pred_ranges, average=None, 
+            labels=["Podium", "Points", "Midfield", "Back", "DNF"]
+        )
+        
+        ranges = ["Podium", "Points", "Midfield", "Back", "DNF"]
+        for i, r in enumerate(ranges):
+            print(f"{r:8}: Precision={range_precision[i]:.3f}, Recall={range_recall[i]:.3f}, F1={range_f1[i]:.3f}")
+        
+        # 3. Confusion Matrix Analysis (Top 10 positions + DNF)
+        print(f"\n3. CONFUSION MATRIX SUMMARY (Positions 1-10 + DNF)")
+        print("-" * 50)
+        
+        # Focus on positions 1-10 and DNF
+        focus_mask = ((target_valid >= 1) & (target_valid <= 10)) | (target_valid == 21)
+        focus_pred = pred_valid[focus_mask]
+        focus_target = target_valid[focus_mask]
+        
+        # Map DNF to position 11 for confusion matrix
+        focus_pred_cm = focus_pred.copy()
+        focus_target_cm = focus_target.copy()
+        focus_pred_cm[focus_pred_cm == 21] = 11
+        focus_target_cm[focus_target_cm == 21] = 11
+        
+        cm = confusion_matrix(focus_target_cm, focus_pred_cm, labels=list(range(1, 12)))
+        
+        # Show diagonal accuracy for key positions
+        diagonal = np.diag(cm)
+        total_per_class = cm.sum(axis=1)
+        
+        print("Position | Accuracy | Total Predictions")
+        print("-" * 35)
+        for i in range(10):  # Positions 1-10
+            acc = diagonal[i] / total_per_class[i] if total_per_class[i] > 0 else 0
+            print("2d")
+        dnf_acc = diagonal[10] / total_per_class[10] if total_per_class[10] > 0 else 0
+        print("5.1f")
+        
+        # 4. Feature Usage Analysis
+        print(f"\n4. FEATURE USAGE VALIDATION")
+        print("-" * 40)
+        
+        # Check if DNF features are in the feature set
+        dnf_features = [i for i, name in enumerate(self.feature_names) if 'dnf' in name.lower()]
+        if dnf_features:
+            print(f"DNF features found: {[self.feature_names[i] for i in dnf_features]}")
+            print("✓ Model has access to DNF historical data")
+            
+            # Analyze feature correlations with DNF outcomes
+            X_test_flat = self.X_test.reshape(-1, self.X_test.shape[2])
+            y_test_flat = self.y_test.flatten()
+            mask_flat = self.create_mask(self.y_test).flatten()
+            
+            valid = mask_flat == 1
+            dnf_outcomes = (y_test_flat == 21)[valid]
+            
+            print("\nDNF Feature Correlations with Actual DNFs:")
+            for idx in dnf_features:
+                feature_values = X_test_flat[valid, idx]
+                correlation = np.corrcoef(feature_values, dnf_outcomes.astype(int))[0, 1]
+                print("30s")
+        else:
+            print("⚠ No DNF features found in feature set")
+        
+        # 5. Model Calibration Check
+        print(f"\n5. MODEL CALIBRATION ANALYSIS")
+        print("-" * 40)
+        
+        # For positions 1-5, check if predictions are reasonable
+        podium_mask = (target_valid >= 1) & (target_valid <= 3)
+        if podium_mask.sum() > 0:
+            podium_preds = pred_valid[podium_mask]
+            podium_targets = target_valid[podium_mask]
+            
+            # Check how often podium predictions are reasonable
+            reasonable_podium = ((podium_preds >= 1) & (podium_preds <= 5)).sum()
+            print(f"Podium predictions in top-5 range: {reasonable_podium}/{podium_mask.sum()} ({reasonable_podium/podium_mask.sum()*100:.1f}%)")
+        
+        # 6. Race-Level Consistency
+        print(f"\n6. RACE-LEVEL CONSISTENCY")
+        print("-" * 40)
+        
+        race_maes = []
+        race_dnf_accuracy = []
+        
+        for race_idx in range(len(predictions)):
+            race_pred = predictions[race_idx]
+            race_target = targets[race_idx]
+            race_mask = masks[race_idx]
+            
+            # Race MAE (excluding DNFs)
+            valid_positions = (race_target <= 20) & (race_mask == 1)
+            if valid_positions.sum() > 0:
+                race_mae = np.mean(np.abs(race_pred[valid_positions] - race_target[valid_positions]))
+                race_maes.append(race_mae)
+            
+            # DNF accuracy for this race
+            race_dnf_pred = (race_pred == 21)
+            race_dnf_actual = (race_target == 21)
+            race_dnf_acc = np.mean(race_dnf_pred == race_dnf_actual)
+            race_dnf_accuracy.append(race_dnf_acc)
+        
+        if race_maes:
+            print(f"Average Race MAE: {np.mean(race_maes):.2f} ± {np.std(race_maes):.2f}")
+        print(f"Average Race DNF Accuracy: {np.mean(race_dnf_accuracy)*100:.1f}% ± {np.std(race_dnf_accuracy)*100:.1f}%")
+        
+        # 7. Production Readiness Score
+        print(f"\n7. PRODUCTION READINESS SCORE")
+        print("-" * 40)
+        
+        # Calculate a composite score
+        base_score = tol2_acc * 100  # ±2 position accuracy as base
+        
+        # Bonuses
+        dnf_bonus = min(f1 * 20, 10)  # Up to 10 points for good DNF prediction
+        consistency_bonus = max(0, 5 - np.std(race_maes)) if race_maes else 0  # Up to 5 points for consistency
+        
+        total_score = base_score + dnf_bonus + consistency_bonus
+        
+        print(f"Base Score (±2 accuracy): {base_score:.1f}/100")
+        print(f"DNF Bonus: +{dnf_bonus:.1f}/10")
+        print(f"Consistency Bonus: +{consistency_bonus:.1f}/5")
+        print(f"Total Production Score: {total_score:.1f}/115")
+        
+        if total_score >= 80:
+            print("🎯 PRODUCTION READY: Excellent performance across all metrics")
+        elif total_score >= 65:
+            print("✅ GOOD: Solid performance, ready for production with monitoring")
+        elif total_score >= 50:
+            print("⚠️  NEEDS IMPROVEMENT: Functional but requires optimization")
+        else:
+            print("❌ NOT READY: Significant issues need addressing")
 
 
 def main():
@@ -551,7 +966,9 @@ def main():
     pipeline = F1PositionPredictionPipeline(
         data_file=DATA_FILE,
         device='cuda',
-        seed=339
+        seed=339,
+        use_pointer=False,  # Set to True to use Pointer Network instead of Hungarian
+        use_conditional=False  # Set to True to use conditional DNF modeling
     )
     
     # Load data
@@ -591,7 +1008,7 @@ def main():
     
     # Test on held-out test set
     pipeline.test_model(show_predictions=True)
-
+    
 
 if __name__ == "__main__":
     main()
