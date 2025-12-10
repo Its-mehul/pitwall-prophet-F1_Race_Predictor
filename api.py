@@ -3,7 +3,7 @@ API Backend for F1 Position Prediction
 Provides endpoints for model inference
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
@@ -13,6 +13,18 @@ import json
 
 app = Flask(__name__)
 CORS(app)
+
+# Serve UI and assets
+@app.route('/', methods=['GET'])
+def serve_ui_root():
+    """Serve the main UI file"""
+    return send_from_directory('.', 'ui.html')
+
+
+@app.route('/assets/<path:filename>', methods=['GET'])
+def serve_asset(filename):
+    """Serve asset files from the assets directory"""
+    return send_from_directory('assets', filename)
 
 
 class F1PredictionAPI(F1PositionPredictionPipeline):
@@ -425,5 +437,8 @@ def initialize_api():
 
 
 if __name__ == '__main__':
+    import os
     initialize_api()
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    # Allow overriding port via environment variable, default to 8080
+    port = int(os.environ.get('PORT', '8080'))
+    app.run(host='0.0.0.0', port=port, debug=False)
