@@ -412,6 +412,13 @@
             background: linear-gradient(135deg, #CD7F32 0%, #B87333 100%);
             color: #000;
         }
+
+        .result-position.dnf {
+            background: #85888b; /* grey */
+            color: #fff;
+            font-size: 1em;
+            letter-spacing: 0.5px;
+        }
         
         .result-logo {
             width: 60px;
@@ -552,7 +559,7 @@
     <div id="messageArea" class="message-area"></div>
     
     <script>
-        const API_URL = 'http://localhost:5001/api';
+        const API_URL = '/api';
         let currentDrivers = [];
         let currentRaceData = null;
         let hasActualPositions = false;  // Track if we have ground truth data
@@ -788,27 +795,47 @@
             
             console.log('Displaying results, first prediction:', predictions[0]);
             
-            predictions.forEach((result, index) => {
+            // Treat any predicted position > 20 as DNF (model may use 21 as DNF sentinel)
+            const normal = [];
+            const dnfs = [];
+            predictions.forEach(p => {
+                const pos = p.predicted_position;
+                // Consider undefined/null/0 or >20 as DNF
+                const isDnf = pos === undefined || pos === null || pos === 0 || (Number(pos) > 20);
+                if (isDnf) dnfs.push(p);
+                else normal.push(p);
+            });
+
+            // Sort non-DNF by predicted position ascending
+            normal.sort((a, b) => a.predicted_position - b.predicted_position);
+
+            // Append DNFs after normal predictions
+            let ordered = normal.concat(dnfs);
+
+            // If model produced more than 20 entries, trim to 20 to avoid showing an extra index
+            if (ordered.length > 20) ordered = ordered.slice(0, 20);
+
+            ordered.forEach((result, index) => {
                 const row = document.createElement('div');
                 row.className = hasActualPositions ? 'result-row with-actual' : 'result-row';
-                
+
                 const position = result.predicted_position;
                 let posClass = '';
                 if (position === 1) posClass = 'pos-1';
                 else if (position === 2) posClass = 'pos-2';
                 else if (position === 3) posClass = 'pos-3';
-                
+
                 const logoPath = getTeamLogoPath(result.team_name);
-                
+
                 // Calculate prediction accuracy
                 console.log('Result object:', result);
                 const actualPos = result.actual_position;
                 const predictedPos = result.predicted_position;
-                
+
                 console.log(`Driver ${result.driver_name}: actualPos=${actualPos} (type: ${typeof actualPos}), predictedPos=${predictedPos}`);
-                
+
                 let diff, diffLabel;
-                
+
                 // Check if actual_position exists and is valid
                 if (actualPos === undefined || actualPos === null || actualPos === 0) {
                     // DNF or missing data - show as DNF
@@ -817,7 +844,7 @@
                 } else {
                     // Valid position - calculate difference
                     diff = predictedPos - actualPos;  // Positive = predicted higher, negative = predicted lower
-                    
+
                     // Format difference label
                     if (diff === 0) {
                         diffLabel = '✓ EXACT';
@@ -827,9 +854,15 @@
                         diffLabel = `${diff}`;
                     }
                 }
-                
+
+                // Choose badge: grey DNF badge when predicted_position === 0, else show number with pos classes
+                const isPredDnf = predictedPos === 0 || predictedPos === null || predictedPos === undefined || Number(predictedPos) > 20;
+                const badgeHtml = isPredDnf
+                    ? `<div class="result-position dnf">DNF</div>`
+                    : `<div class="result-position ${posClass}">${position}</div>`;
+
                 row.innerHTML = `
-                    <div class="result-position ${posClass}">${position}</div>
+                    ${badgeHtml}
                     <div class="result-logo">
                         ${logoPath ? `<img src="${logoPath}" alt="${result.team_name}">` : ''}
                     </div>
@@ -839,7 +872,7 @@
                         ${diffLabel}
                     </div>` : ''}
                 `;
-                
+
                 resultsGrid.appendChild(row);
             });
         }

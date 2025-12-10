@@ -313,6 +313,217 @@ class F1PositionPredictionPipeline:
         
         return correct / total if total > 0 else 0.0
     
+    def compute_kendall_tau(self, predictions, targets, mask=None):
+        """Compute Kendall's Tau correlation coefficient for ranking similarity"""
+        from scipy.stats import kendalltau
+        
+        if mask is not None:
+            valid = mask.astype(bool)
+            pred_valid = predictions[valid]
+            target_valid = targets[valid]
+        else:
+            pred_valid = predictions.flatten()
+            target_valid = targets.flatten()
+        
+        # Only consider finishers (positions 1-20), exclude DNFs
+        valid_mask = (target_valid >= 1) & (target_valid <= 20)
+        pred_valid = pred_valid[valid_mask]
+        target_valid = target_valid[valid_mask]
+        
+        if len(pred_valid) < 2:
+            return 0.0
+        
+        # Convert to rankings (lower position number = better rank)
+        tau, _ = kendalltau(pred_valid, target_valid)
+        return tau if not np.isnan(tau) else 0.0
+    
+    def compute_spearman_correlation(self, predictions, targets, mask=None):
+        """Compute Spearman's rank correlation coefficient"""
+        from scipy.stats import spearmanr
+        
+        if mask is not None:
+            valid = mask.astype(bool)
+            pred_valid = predictions[valid]
+            target_valid = targets[valid]
+        else:
+            pred_valid = predictions.flatten()
+            target_valid = targets.flatten()
+        
+        # Only consider finishers (positions 1-20), exclude DNFs
+        valid_mask = (target_valid >= 1) & (target_valid <= 20)
+        pred_valid = pred_valid[valid_mask]
+        target_valid = target_valid[valid_mask]
+        
+        if len(pred_valid) < 2:
+            return 0.0
+        
+        corr, _ = spearmanr(pred_valid, target_valid)
+        return corr if not np.isnan(corr) else 0.0
+    
+    def compute_ndcg(self, predictions, targets, mask=None, k=None):
+        """Compute Normalized Discounted Cumulative Gain (NDCG)"""
+        def dcg(scores, k=None):
+            scores = np.asarray(scores)
+            if k is not None:
+                scores = scores[:k]
+            gains = 2**scores - 1
+            discounts = np.log2(np.arange(2, len(gains) + 2))
+            return np.sum(gains / discounts)
+        
+        if mask is not None:
+            valid = mask.astype(bool)
+            pred_valid = predictions[valid]
+            target_valid = targets[valid]
+        else:
+            pred_valid = predictions.flatten()
+            target_valid = targets.flatten()
+        
+        # Only consider finishers (positions 1-20), exclude DNFs
+        valid_mask = (target_valid >= 1) & (target_valid <= 20)
+        pred_valid = pred_valid[valid_mask]
+        target_valid = target_valid[valid_mask]
+        
+        if len(pred_valid) < 2:
+            return 0.0
+        
+        # Convert positions to relevance scores (higher position = lower score)
+        # Position 1 gets score 20, position 20 gets score 1
+        pred_scores = 21 - pred_valid
+        target_scores = 21 - target_valid
+        
+        # Sort by predicted ranking
+        pred_order = np.argsort(pred_valid)
+        target_scores_sorted = target_scores[pred_order]
+        
+        dcg_score = dcg(target_scores_sorted, k)
+        idcg_score = dcg(np.sort(target_scores)[::-1], k)  # Ideal DCG
+        
+        return dcg_score / idcg_score if idcg_score > 0 else 0.0
+    
+    def compute_top_k_accuracy(self, predictions, targets, mask=None, k=3):
+        """Compute accuracy of predicting top-k positions correctly"""
+        if mask is not None:
+            valid = mask.astype(bool)
+            pred_valid = predictions[valid]
+            target_valid = targets[valid]
+        else:
+            pred_valid = predictions.flatten()
+            target_valid = targets.flatten()
+        
+        # Only consider finishers (positions 1-20), exclude DNFs
+        valid_mask = (target_valid >= 1) & (target_valid <= 20)
+        pred_valid = pred_valid[valid_mask]
+        target_valid = target_valid[valid_mask]
+        
+        if len(pred_valid) < k:
+            return 0.0
+        
+        # Get top-k predicted positions
+        pred_top_k = np.argsort(pred_valid)[:k] + 1  # +1 because positions start from 1
+        target_top_k = np.argsort(target_valid)[:k] + 1
+        
+        # Compute intersection accuracy
+        intersection = len(set(pred_top_k) & set(target_top_k))
+        return intersection / k
+    
+    def compute_rank_biased_overlap(self, predictions, targets, mask=None, p=0.9):
+        """Compute Rank Biased Overlap (RBO) similarity measure"""
+        def rbo_score(list1, list2, p):
+            if len(list1) != len(list2):
+                raise ValueError("Lists must be same length")
+            
+            if not list1 or not list2:
+                return 0.0
+            
+            k = len(list1)
+            rbo = 0.0
+            
+            for d in range(1, k + 1):
+                x_d = len(set(list1[:d]) & set(list2[:d]))
+                rbo += (p ** (d - 1)) * (x_d / d)
+            
+            return (1 - p) * rbo
+        
+        if mask is not None:
+            valid = mask.astype(bool)
+            pred_valid = predictions[valid]
+            target_valid = targets[valid]
+        else:
+            pred_valid = predictions.flatten()
+            target_valid = targets.flatten()
+        
+        # Only consider finishers (positions 1-20), exclude DNFs
+        valid_mask = (target_valid >= 1) & (target_valid <= 20)
+        pred_valid = pred_valid[valid_mask]
+        target_valid = target_valid[valid_mask]
+        
+        if len(pred_valid) < 2:
+            return 0.0
+        
+        # Convert to driver indices sorted by position (best to worst)
+        pred_order = np.argsort(pred_valid)
+        target_order = np.argsort(target_valid)
+        
+        return rbo_score(pred_order.tolist(), target_order.tolist(), p)
+    
+    def compute_mean_reciprocal_rank(self, predictions, targets, mask=None):
+        """Compute Mean Reciprocal Rank (MRR)"""
+        if mask is not None:
+            valid = mask.astype(bool)
+            pred_valid = predictions[valid]
+            target_valid = targets[valid]
+        else:
+            pred_valid = predictions.flatten()
+            target_valid = targets.flatten()
+        
+        # Only consider finishers (positions 1-20), exclude DNFs
+        valid_mask = (target_valid >= 1) & (target_valid <= 20)
+        pred_valid = pred_valid[valid_mask]
+        target_valid = target_valid[valid_mask]
+        
+        if len(pred_valid) < 1:
+            return 0.0
+        
+        # For each actual position, find its rank in predictions
+        mrr_sum = 0.0
+        for actual_pos in target_valid:
+            # Find where this position appears in predictions
+            pred_ranks = np.argsort(pred_valid) + 1  # 1-based ranks
+            actual_rank_in_pred = np.where(pred_valid == actual_pos)[0]
+            if len(actual_rank_in_pred) > 0:
+                rank = actual_rank_in_pred[0] + 1  # 1-based
+                mrr_sum += 1.0 / rank
+        
+        return mrr_sum / len(target_valid) if len(target_valid) > 0 else 0.0
+    
+    def compute_ranking_similarity_metrics(self, predictions, targets, mask=None):
+        """Compute comprehensive ranking similarity metrics"""
+        metrics = {}
+        
+        # Kendall's Tau
+        metrics['kendall_tau'] = self.compute_kendall_tau(predictions, targets, mask)
+        
+        # Spearman's Correlation
+        metrics['spearman_corr'] = self.compute_spearman_correlation(predictions, targets, mask)
+        
+        # NDCG scores
+        metrics['ndcg@5'] = self.compute_ndcg(predictions, targets, mask, k=5)
+        metrics['ndcg@10'] = self.compute_ndcg(predictions, targets, mask, k=10)
+        metrics['ndcg_all'] = self.compute_ndcg(predictions, targets, mask, k=None)
+        
+        # Top-k accuracies
+        metrics['top_1_acc'] = self.compute_top_k_accuracy(predictions, targets, mask, k=1)
+        metrics['top_3_acc'] = self.compute_top_k_accuracy(predictions, targets, mask, k=3)
+        metrics['top_5_acc'] = self.compute_top_k_accuracy(predictions, targets, mask, k=5)
+        
+        # Rank Biased Overlap
+        metrics['rbo'] = self.compute_rank_biased_overlap(predictions, targets, mask)
+        
+        # Mean Reciprocal Rank
+        metrics['mrr'] = self.compute_mean_reciprocal_rank(predictions, targets, mask)
+        
+        return metrics
+    
     def train_single_fold(self, X_train_fold, y_train_fold, X_val_fold, y_val_fold, params):
         """Train model on a single fold and return validation accuracy"""
         train_mask = self.create_mask(y_train_fold)
@@ -757,6 +968,24 @@ class F1PositionPredictionPipeline:
         print(f"Test Bin Accuracy (Podium/Points/Mid/Back): {bin_acc * 100:.2f}%")
         print(f"Test Mean Absolute Error: {mae:.2f} positions")
         
+        # Ranking Similarity Metrics
+        print(f"\n{'='*80}")
+        print("RANKING SIMILARITY METRICS")
+        print(f"{'='*80}")
+        
+        ranking_metrics = self.compute_ranking_similarity_metrics(all_preds, all_targets, all_masks)
+        
+        print(f"Kendall's Tau Correlation: {ranking_metrics['kendall_tau']:.4f}")
+        print(f"Spearman's Rank Correlation: {ranking_metrics['spearman_corr']:.4f}")
+        print(f"NDCG@5: {ranking_metrics['ndcg@5']:.4f}")
+        print(f"NDCG@10: {ranking_metrics['ndcg@10']:.4f}")
+        print(f"NDCG@All: {ranking_metrics['ndcg_all']:.4f}")
+        print(f"Top-1 Accuracy: {ranking_metrics['top_1_acc']:.4f}")
+        print(f"Top-3 Accuracy: {ranking_metrics['top_3_acc']:.4f}")
+        print(f"Top-5 Accuracy: {ranking_metrics['top_5_acc']:.4f}")
+        print(f"Rank Biased Overlap (RBO): {ranking_metrics['rbo']:.4f}")
+        print(f"Mean Reciprocal Rank (MRR): {ranking_metrics['mrr']:.4f}")
+        
         # Production-grade evaluation metrics
         print(f"\n{'='*80}")
         print("PRODUCTION-GRADE EVALUATION METRICS")
@@ -1008,7 +1237,7 @@ def main():
     
     # Test on held-out test set
     pipeline.test_model(show_predictions=True)
-    
+
 
 if __name__ == "__main__":
     main()
