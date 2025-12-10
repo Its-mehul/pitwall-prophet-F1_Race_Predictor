@@ -1,5 +1,21 @@
 import pandas as pd
-import numpy as np
+
+# Load raw data
+df = pd.read_csv('f1_raw_2021_2025.csv')
+
+# Mark DNF: final_position is NaN or time_or_status is 'DNF' or 'NC'
+df['is_dnf'] = df['final_position'].isna() | df['time_or_status'].astype(str).str.upper().isin(['DNF', 'NC'])
+
+driver_dnf = df.groupby('driver_name')['is_dnf'].mean().reset_index().rename(columns={'is_dnf': 'dnf_rate_driver'})
+team_dnf = df.groupby('team_name')['is_dnf'].mean().reset_index().rename(columns={'is_dnf': 'dnf_rate_team'})
+
+# Merge rates back to each row
+df = df.merge(driver_dnf, on='driver_name', how='left')
+df = df.merge(team_dnf, on='team_name', how='left')
+
+# Save annotated CSV
+df.to_csv('f1_raw_2021_2025_with_dnf.csv', index=False)
+print('Annotated DNF rates and saved to f1_raw_2021_2025_with_dnf.csv')
 
 # Load processed CSV
 csv_path = "f1_processed_2021_2025.csv"
