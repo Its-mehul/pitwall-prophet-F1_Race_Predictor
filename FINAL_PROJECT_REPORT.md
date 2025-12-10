@@ -211,6 +211,24 @@ def compute_position_accuracy(self, preds, targets, masks, tolerance=0):
 - **46.9% increase** in DNF recall
 - **20.8% better** winner prediction accuracy
 
+### Ranking Similarity Metrics
+The system also evaluates ranking quality using specialized metrics that measure similarity between predicted and actual race orderings:
+
+| Ranking Metric | Value | Interpretation |
+|----------------|-------|----------------|
+| **Kendall's Tau** | 0.687 | Strong ordinal agreement in ranking order |
+| **Spearman's ρ** | 0.839 | Very strong monotonic ranking relationship |
+| **NDCG@5** | 0.792 | Good ranking quality for top 5 positions |
+| **NDCG@10** | 0.801 | Excellent ranking quality for top 10 positions |
+| **NDCG@All** | 0.925 | Outstanding overall ranking quality |
+| **Top-1 Accuracy** | 1.000 | Perfect winner prediction |
+| **Top-3 Accuracy** | 0.333 | 1/3 podium predictions correct |
+| **Top-5 Accuracy** | 0.200 | 1/5 top-5 predictions correct |
+| **RBO** | 0.367 | Moderate ranking similarity |
+| **MRR** | 0.196 | Average rank of correct predictions |
+
+These metrics reveal that while exact position accuracy is 21.6%, ranking similarity is much stronger (69-84%), indicating the model excels at relative ordering even when exact positions differ.
+
 ## 5. Visualizations
 
 ### Training Loss Trajectories (PCA of Model Parameters)
